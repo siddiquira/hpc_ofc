@@ -270,6 +270,7 @@ def test_model_dicts(X_dict, y_dict, metric='f1'):
     results = {}
     for x_key, X_arr in X_dict.items():
         results[x_key] = {}
+        results[x_key]['n_neurons'] = X_arr.shape[1]
         for y_key, y_arr in y_dict.items():
             logging.debug(f"Testing model with X: {x_key} and y: {y_key}")
             try:
@@ -279,7 +280,7 @@ def test_model_dicts(X_dict, y_dict, metric='f1'):
                 # Test the model and store results
                 score = test_model(X_arr, y_arr.ravel(), metric=metric)
                 results[x_key][y_key]['score'] = score
-                results[x_key][y_key]['classes'] = np.unique(y_arr.ravel(), return_counts=True)
+                # results[x_key][y_key]['classes'] = np.unique(y_arr.ravel(), return_counts=True)
             except Exception as e:
                 # Handle errors gracefully
                 logging.error(f"Error processing {x_key}/{y_key}: {str(e)}")
