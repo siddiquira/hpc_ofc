@@ -3,14 +3,92 @@ import h5py
 import numpy as np
 import pandas as pd
 import re
+import pickle
+import logging
+from collections import Counter
 from scipy.io import loadmat
 from sklearn.preprocessing import LabelEncoder, label_binarize
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.svm import SVC
-from collections import Counter
-import pickle
-import logging
+import argparse
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+def parse_events_data(session_path, probe_list_path="../CODE/behaviour/probe_list.xlsx"):
+    """
+    Parse events data from a session using two different methods.
+    
+    Args:
+        session_path (str): Path to the session directory
+        probe_list_path (str): Path to the probe list Excel file
+        
+    Returns:
+        tuple: (events, event_times) if successful, (None, None) otherwise
+    """
+    logging.info(f"Attempting to parse events data from {session_path}")
+    
+    # Try method 2 first (using recordingEvents.mat)
+    try:
+        logging.info("Trying method 2 (recordingEvents.mat)...")
+        events_path = os.path.join(session_path, 'recordingEvents.mat')
+        
+        if not os.path.exists(events_path):
+            logging.warning(f"File not found: {events_path}")
+            raise FileNotFoundError(f"File not found: {events_path}")
+            
+        events_data = loadmat(events_path)
+        event_idxs = events_data['event']['Strobed'][0][0]
+        event_times = events_data['event'][0][0][0]
+        
+        # Load labels from Excel file
+        if not os.path.exists(probe_list_path):
+            logging.warning(f"Probe list file not found: {probe_list_path}")
+            raise FileNotFoundError(f"Probe list file not found: {probe_list_path}")
+            
+        labels = pd.read_excel(probe_list_path, header=None)
+        labels = labels.to_numpy()
+        lookup = dict(labels)
+        
+        events = np.array([lookup.get(x, 'UNKNOWN') for x in event_idxs.flatten()])
+        events = events.reshape(-1, 1)
+        
+        # Filter out LICKING and _ITI events
+        mask = (events.flatten() == 'LICKING') | np.char.endswith(events.flatten(), '_ITI')
+        mask = ~mask
+        events = list(events[mask].flatten())
+        event_times = event_times[mask]
+        
+        logging.info(f"Method 2 successful: Found {len(events)} events")
+        return events, event_times
+        
+    except Exception as e:
+        logging.warning(f"Method 2 failed: {str(e)}")
+        
+        # Try method 1 (using raw_events_pl2.mat)
+        try:
+            logging.info("Trying method 1 (raw_events_pl2.mat)...")
+            events_path = os.path.join(session_path, 'raw_events_pl2.mat')
+            
+            if not os.path.exists(events_path):
+                logging.warning(f"File not found: {events_path}")
+                raise FileNotFoundError(f"File not found: {events_path}")
+                
+            events_data = loadmat(events_path)
+            events = events_data['evt'][0][0][2]
+            events = [e[0] for e in events.flatten()]
+            event_times = events_data['evt'][0][0][0]
+            
+            logging.info(f"Method 1 successful: Found {len(events)} events")
+            return events, event_times
+            
+        except Exception as e:
+            logging.error(f"Both methods failed. Last error: {str(e)}")
+            return None, None
 
 def extract_odor_events(event_array, window='default'):
     """
@@ -27,21 +105,17 @@ def extract_odor_events(event_array, window='default'):
         Dictionary of events and tone patterns (ascending=0, descending=1)
     """
     result = {}
-    tone_patterns = []
     pattern_ids = {
-        # Ascending pattern gets ID 0
-        'ascending': 0,
-        # Descending pattern gets ID 1
-        'descending': 1
+        'ascending': 0,  # Ascending pattern gets ID 0
+        'descending': 1  # Descending pattern gets ID 1
     }
-    i = 0
     event_id = 0
 
     # Regex patterns for event identification
     odor_pattern = re.compile(r'^Odor_(\d+)$')
     tone_on_pattern = re.compile(r'^TONE_ON_(\d+)Hz$')
-    tone_off_pattern = re.compile(r'^TONE_OFF_(\d+)Hz$')
 
+    i = 0
     while i < len(event_array):
         if event_array[i].startswith('ODOR_POKE'):
             start_idx = i
@@ -75,7 +149,7 @@ def extract_odor_events(event_array, window='default'):
                     odor = event_array[j]
                     break
 
-            # Extract tone frequencies and determine if pattern is ascending or descending
+            # Extract tone frequencies and determine pattern
             tone_frequencies = []
             for j in range(start_idx, end_idx + 1):
                 match = tone_on_pattern.match(event_array[j])
@@ -86,23 +160,22 @@ def extract_odor_events(event_array, window='default'):
             # Determine pattern type (ascending or descending)
             tone_pattern_id = None
             if tone_frequencies:
-                is_ascending = all(tone_frequencies[i] <= tone_frequencies[i+1] for i in range(len(tone_frequencies)-1))
-                is_descending = all(tone_frequencies[i] >= tone_frequencies[i+1] for i in range(len(tone_frequencies)-1))
+                is_ascending = all(tone_frequencies[i] <= tone_frequencies[i+1] 
+                                  for i in range(len(tone_frequencies)-1))
+                is_descending = all(tone_frequencies[i] >= tone_frequencies[i+1] 
+                                   for i in range(len(tone_frequencies)-1))
                 
                 if is_ascending:
-                    tone_pattern_id = pattern_ids['ascending']  # 0
+                    tone_pattern_id = pattern_ids['ascending']
                 elif is_descending:
-                    tone_pattern_id = pattern_ids['descending']  # 1
+                    tone_pattern_id = pattern_ids['descending']
             
-            # Set the range based on the window parameter
-            if window == 'default':
-                range_value = (start_idx + 1, end_idx)
-            elif window == 'pre_odor':
+            # Set range based on window parameter
+            if window == 'pre_odor':
                 range_value = (start_idx + 1, end_idx - 2)
             elif window == 'post_odor':
                 range_value = (start_idx + 6, end_idx)
-            else:
-                # Default to the original behavior if an invalid window is specified
+            else:  # default
                 range_value = (start_idx + 1, end_idx)
 
             result[event_id] = {
@@ -162,6 +235,7 @@ def test_model(X, y, metric='f1'):
         model.fit(X_train, y_train)
         y_pred = model.predict(X_test)
 
+        # Calculate scores based on specified metric
         if metric == 'accuracy':
             score = accuracy_score(y_test, y_pred)
         elif metric == 'f1':
@@ -179,8 +253,7 @@ def test_model(X, y, metric='f1'):
 
         scores.append(score)
 
-    # print(f"Mean {metric}: {np.mean(scores):.4f}")
-    return np.mean(scores)
+    return np.mean(scores),np.std(scores)/np.sqrt(10)
 
 def test_model_dicts(X_dict, y_dict, metric='f1'):
     """
@@ -198,97 +271,28 @@ def test_model_dicts(X_dict, y_dict, metric='f1'):
     for x_key, X_arr in X_dict.items():
         results[x_key] = {}
         for y_key, y_arr in y_dict.items():
-            # print(f"Testing model with X: {x_key} and y: {y_key}")
+            logging.debug(f"Testing model with X: {x_key} and y: {y_key}")
             try:
-                # Initialize the nested dictionary structure first
+                # Initialize nested dictionary structure
                 results[x_key][y_key] = {}
                 
-                score = test_model(X_arr, y_arr.ravel(), metric=metric)  # flatten y if needed
+                # Test the model and store results
+                score = test_model(X_arr, y_arr.ravel(), metric=metric)
                 results[x_key][y_key]['score'] = score
                 results[x_key][y_key]['classes'] = np.unique(y_arr.ravel(), return_counts=True)
             except Exception as e:
-                # Handle potential errors gracefully
-                print(f"Error processing {x_key}/{y_key}: {str(e)}")
+                # Handle errors gracefully
+                logging.error(f"Error processing {x_key}/{y_key}: {str(e)}")
                 results[x_key][y_key] = {'score': None, 'error': str(e)}
     return results
 
-def parse_events_data(session_path, probe_list_path="../CODE/behaviour/probe_list.xlsx"):
+def run_analysis(session_path, window='default'):
     """
-    Parse events data from a session using two different methods.
-    
-    Args:
-        session_path (str): Path to the session directory
-        probe_list_path (str): Path to the probe list Excel file
-        
-    Returns:
-        tuple: (events, event_times) if successful, (None, None) otherwise
-    """
-    logging.info(f"Attempting to parse events data from {session_path}")
-    
-    # Try the second method first (using recordingEvents.mat)
-    try:
-        logging.info("Trying method 2 (recordingEvents.mat)...")
-        events_path = os.path.join(session_path, 'recordingEvents.mat')
-        
-        if not os.path.exists(events_path):
-            logging.warning(f"File not found: {events_path}")
-            raise FileNotFoundError(f"File not found: {events_path}")
-            
-        events_data = loadmat(events_path)
-        event_idxs = events_data['event']['Strobed'][0][0]
-        event_times = events_data['event'][0][0][0]
-        
-        # Load labels from Excel file
-        if not os.path.exists(probe_list_path):
-            logging.warning(f"Probe list file not found: {probe_list_path}")
-            raise FileNotFoundError(f"Probe list file not found: {probe_list_path}")
-            
-        labels = pd.read_excel(probe_list_path, header=None)
-        labels = labels.to_numpy()
-        lookup = dict(labels)
-        
-        events = np.array([lookup.get(x, 'UNKNOWN') for x in event_idxs.flatten()])
-        events = events.reshape(-1, 1)
-        
-        # Filter out LICKING and _ITI events
-        mask = (events.flatten() == 'LICKING') | np.char.endswith(events.flatten(), '_ITI')
-        mask = ~mask
-        events = list(events[mask].flatten())
-        event_times = event_times[mask]
-        
-        logging.info(f"Method 2 successful: Found {len(events)} events")
-        return events, event_times
-        
-    except Exception as e:
-        logging.warning(f"Method 2 failed: {str(e)}")
-        logging.info("Trying method 1 (raw_events_pl2.mat)...")
-        
-        # Try the first method (using raw_events_pl2.mat)
-        try:
-            events_path = os.path.join(session_path, 'raw_events_pl2.mat')
-            
-            if not os.path.exists(events_path):
-                logging.warning(f"File not found: {events_path}")
-                raise FileNotFoundError(f"File not found: {events_path}")
-                
-            events_data = loadmat(events_path)
-            events = events_data['evt'][0][0][2]
-            events = [e[0] for e in events.flatten()]
-            event_times = events_data['evt'][0][0][0]
-            
-            logging.info(f"Method 1 successful: Found {len(events)} events")
-            return events, event_times
-            
-        except Exception as e:
-            logging.error(f"Both methods failed. Last error: {str(e)}")
-            return None, None
-
-def run_analysis(session_path,window):
-    """
-    Run neural data analysis for a single session.
+    Run decoding analysis for a single session.
     
     Args:
         session_path: Path to session directory
+        window: Time window for event extraction
         
     Returns:
         Dictionary of model performance scores
@@ -299,7 +303,7 @@ def run_analysis(session_path,window):
         mouse = path_parts[-2]
         session = path_parts[-1]
         
-        print(f"Analyzing {mouse}/{session}")
+        logging.info(f"Analyzing {mouse}/{session}")
 
         # Load spiking data
         spike_path = os.path.join(session_path, 'extracted_spikes.mat')
@@ -308,7 +312,7 @@ def run_analysis(session_path,window):
             ts_sec = np.array(f['spikeStruct']['ts_sec'])
 
         # Create raster with time bins
-        dt = 0.001
+        dt = 0.001  # 1ms bins
         bins = np.arange(0, ts_sec.max() + dt, dt)
         neuron_ids = np.unique(clu)
         neuron_idxs = LabelEncoder().fit_transform(clu.flatten())
@@ -325,8 +329,11 @@ def run_analysis(session_path,window):
         hpc_raster = raster[hpc_mask.to_numpy(), :]
 
         # Parse events data
-        events,event_times = parse_events_data(session_path, probe_list_path="../CODE/behaviour/probe_list.xlsx")
-        parsed_events = extract_odor_events(events,window=window)
+        events, event_times = parse_events_data(session_path)
+        if events is None or event_times is None:
+            raise ValueError("Failed to parse events data")
+            
+        parsed_events = extract_odor_events(events, window=window)
 
         # Initialize data structures
         X_dict = {}
@@ -338,7 +345,7 @@ def run_analysis(session_path,window):
         X_ofc = []
 
         # Process each trial epoch
-        for epoch in list(parsed_events.keys()):
+        for epoch in parsed_events.keys():
             start_idx, end_idx = parsed_events[epoch]['range']
             start_time = event_times[start_idx][0]
             end_time = event_times[end_idx][0]
@@ -363,7 +370,7 @@ def run_analysis(session_path,window):
                 trial_ofc = ofc_raster[:, start_bin:end_bin].mean(axis=1)
                 X_ofc.append(trial_ofc)
 
-            # Append label values separately
+            # Append label values
             odor_list.append(parsed_events[epoch]['odor'])
             tone_list.append(parsed_events[epoch]['tone_pattern_id'])
             direction_list.append(parsed_events[epoch]['direction'])
@@ -373,14 +380,14 @@ def run_analysis(session_path,window):
         tone_arr = np.array(tone_list).reshape(-1, 1)
         direction_arr = np.array(direction_list).reshape(-1, 1)
 
-        # Pack into dict
+        # Pack labels into dictionary
         y_dict = {
             'odor': odor_arr,
             'tone_pattern_id': tone_arr,
             'direction': direction_arr
         }
 
-        # Convert X to dict based on available data
+        # Convert X lists to arrays and organize by region
         X_raster = np.vstack(X_raster)
         has_hpc = len(X_hpc) > 0
         has_ofc = len(X_ofc) > 0
@@ -403,52 +410,59 @@ def run_analysis(session_path,window):
         
     except Exception as e:
         logging.error(f"Error in run_analysis for {session_path}: {str(e)}")
-        print(f"Analysis failed for {session_path}: {str(e)}")
-        return None  # Return None instead of breaking
+        return None
 
 def main():
     """Main function to process all mice and sessions."""
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description='Process neural data with configurable window')
+    parser.add_argument('--window', type=str, default='default', help='Window type for analysis (default: pre_odor)')
+    args = parser.parse_args()
+
     # Change to data directory
-    os.chdir('../DATA')
+    data_dir = '../DATA'
+    output_path = f'../raiyyan_code/decoding_{args.window}.pkl'
+    expected_files = ['extracted_spikes.mat', 'clusterinfo.csv']
+    
+    original_dir = os.getcwd()
+    os.chdir(data_dir)
     path = os.getcwd()
 
-    # Build the dictionary: dd[mouse][session] = {}
-    mice = [d for d in os.listdir(path) if d.startswith('MT') and os.path.isdir(os.path.join(path, d))]
-    dd = {mouse: {} for mouse in mice}
+    # Build the dictionary: results[mouse][session] = {}
+    mice = [d for d in os.listdir(path) 
+            if d.startswith('MT') and os.path.isdir(os.path.join(path, d))]
+    results = {mouse: {} for mouse in mice}
 
     for mouse in mice:
         mouse_dir = os.path.join(path, mouse)
         sessions = [session for session in os.listdir(mouse_dir) 
                    if os.path.isdir(os.path.join(mouse_dir, session))]
-        dd[mouse] = {session: {} for session in sessions}
-
-    # Files that must be present
-    expected_files = ['extracted_spikes.mat', 'clusterinfo.csv']
+        results[mouse] = {session: {} for session in sessions}
 
     # Iterate over all mice and sessions
-    for mouse, sessions in dd.items():
+    for mouse, sessions in results.items():
         for session in sessions:
             session_path = os.path.join(path, mouse, session)
             present_files = os.listdir(session_path)
 
             if all(f in present_files for f in expected_files):
-                print(f"[✓] All files found for {mouse} / {session}. Running analysis...")
+                logging.info(f"[✓] All files found for {mouse} / {session}. Running analysis...")
                 try:
-                    results = run_analysis(session_path, window='pre_odor')
-                    if results is not None:
-                        dd[mouse][session] = results
-                    # No else needed - if results is None, we simply don't store anything
+                    analysis_results = run_analysis(session_path, window=args.window)
+                    if analysis_results is not None:
+                        results[mouse][session] = analysis_results
                 except Exception as e:
-                    print(f"Error processing {mouse}/{session}: {str(e)}")
-                    # Continue to the next session
+                    logging.error(f"Error processing {mouse}/{session}: {str(e)}")
             else:
                 missing = [f for f in expected_files if f not in present_files]
-                print(f"[✗] Missing files for {mouse} / {session}: {missing}")
+                logging.warning(f"[✗] Missing files for {mouse} / {session}: {missing}")
 
-    # Save or display results
-    with open('../raiyyan_code/decoding_pre_odor.pkl', 'wb') as f:
-        pickle.dump(dd, f)
-    print('Results saved to decoding.pkl')
+    # Save results
+    os.chdir(original_dir)
+    with open(output_path, 'wb') as f:
+        pickle.dump(results, f)
+    logging.info(f'Results saved to {output_path}')
+
 
 if __name__ == "__main__":
     main()
