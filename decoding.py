@@ -176,7 +176,7 @@ def assign_odor_directions(result_dict, forced_choice_dict):
 
     return result_dict
 
-def extract_odor_events(event_array, window='default'):
+def extract_odor_events(session_path,session,event_array, window='default'):
     """
     Extract odor events from event array with pattern identification.
     
@@ -303,7 +303,7 @@ def test_model(X, y, metric='f1'):
     X = X[valid_indices]
     y = np.array(y)[valid_indices]
 
-    # if len(set(y)) < 2:
+    # if len(set(y)) < 10:
     #     raise ValueError("Not enough classes with >=10 samples to perform classification.")
 
     # Label encode y
@@ -378,7 +378,7 @@ def test_model_dicts(X_dict, y_dict, metric='f1'):
                 results[x_key][y_key] = {'score': None, 'error': str(e)}
     return results
 
-def run_analysis(session_path, window='default'):
+def run_analysis(session_path, session, window='default'):
     """
     Run decoding analysis for a single session.
     
@@ -425,7 +425,7 @@ def run_analysis(session_path, window='default'):
         if events is None or event_times is None:
             raise ValueError("Failed to parse events data")
             
-        parsed_events = extract_odor_events(events, window=window)
+        parsed_events = extract_odor_events(session_path, session, events, window=window)
 
         # Initialize data structures
         X_dict = {}
@@ -540,7 +540,7 @@ def main():
             if all(f in present_files for f in expected_files):
                 logging.info(f"[✓] All files found for {mouse} / {session}. Running analysis...")
                 try:
-                    analysis_results = run_analysis(session_path, window=args.window)
+                    analysis_results = run_analysis(session_path, session, window=args.window)
                     if analysis_results is not None:
                         results[mouse][session] = analysis_results
                 except Exception as e:
@@ -554,7 +554,6 @@ def main():
     with open(output_path, 'wb') as f:
         pickle.dump(results, f)
     logging.info(f'Results saved to {output_path}')
-
 
 if __name__ == "__main__":
     main()
