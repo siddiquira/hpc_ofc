@@ -90,6 +90,92 @@ def parse_events_data(session_path, probe_list_path="../CODE/behaviour/probe_lis
             logging.error(f"Both methods failed. Last error: {str(e)}")
             return None, None
 
+def parse_beh(directory_path, session=None):
+    """
+    Parses .beh files depending on session type.
+
+    Args:
+        directory_path (str): Path to directory containing the .beh file(s).
+        session (str, optional): Session name to determine parsing logic.
+
+    Returns:
+        dict: {'left': [...], 'right': [...]} with non -1 values, no duplicates.
+    """
+
+    def parse_single_beh_file(path):
+        # (Same code to parse a single .beh file)
+        beh_files = [f for f in os.listdir(path) if f.endswith('.beh')]
+        if not beh_files:
+            raise FileNotFoundError(f"No .beh file found in {path}")
+        if len(beh_files) > 1:
+            raise RuntimeError(f"Expected one .beh file, found multiple in {path}")
+        file_path = os.path.join(path, beh_files[0])
+
+        with open(file_path, 'r') as f:
+            lines = [line.strip() for line in f.readlines()]
+
+        data = {'left': [], 'right': []}
+        for i in range(13, 29, 2):
+            label = lines[i].lower()
+            try:
+                value = int(lines[i + 1])
+            except (ValueError, IndexError):
+                continue
+            if value == -1:
+                continue
+            if 'left' in label:
+                data['left'].append(value)
+            elif 'right' in label:
+                data['right'].append(value)
+        return data
+
+    # Initialize results dict
+    combined_data = {'left': [], 'right': []}
+
+    if session and session.startswith("VC_Set"):
+        # Parse /set1 and /set2 subdirectories, then merge
+        for subset in ['set1', 'set2']:
+            sub_path = os.path.join(directory_path, subset)
+            if not os.path.isdir(sub_path):
+                raise FileNotFoundError(f"Expected directory not found: {sub_path}")
+            data = parse_single_beh_file(sub_path)
+            # Append non-duplicate values only
+            for side in ['left', 'right']:
+                for val in data[side]:
+                    if val not in combined_data[side]:
+                        combined_data[side].append(val)
+
+    elif session and session.startswith("VC_Stable"):
+        # Parse normally in directory_path
+        combined_data = parse_single_beh_file(directory_path)
+
+    else:
+        # Default fallback: parse normally
+        combined_data = parse_single_beh_file(directory_path)
+
+    return combined_data
+
+def assign_odor_directions(result_dict, forced_choice_dict):
+    for event_id, info in result_dict.items():
+        odor_str = info.get('odor', '')
+        # Extract the odor number as int, assuming format 'Odor_XX'
+        try:
+            odor_num = int(odor_str.split('_')[1])
+        except (IndexError, ValueError):
+            # If parsing fails, skip or set to None
+            info['odor_direction'] = None
+            continue
+        
+        # Decide left or right
+        if odor_num in forced_choice_dict['left']:
+            info['odor_direction'] = 'left'
+        elif odor_num in forced_choice_dict['right']:
+            info['odor_direction'] = 'right'
+        else:
+            info['odor_direction'] = None  # odor number not found in either list
+
+    return result_dict
+
 def extract_odor_events(event_array, window='default'):
     """
     Extract odor events from event array with pattern identification.
@@ -175,6 +261,8 @@ def extract_odor_events(event_array, window='default'):
                 range_value = (start_idx + 1, end_idx - 2)
             elif window == 'post_odor':
                 range_value = (start_idx + 6, end_idx)
+            elif window == 'test':
+                range_value = (start_idx + 1, start_idx + 3)
             else:  # default
                 range_value = (start_idx + 1, end_idx)
 
@@ -189,6 +277,9 @@ def extract_odor_events(event_array, window='default'):
             i = end_idx + 1
         else:
             i += 1
+
+    odor_directions = parse_beh(directory_path=f'{session_path}/Behaviour',session=session)
+    result = assign_odor_directions(result,odor_directions)
 
     return result
 
@@ -206,14 +297,14 @@ def test_model(X, y, metric='f1'):
     """
     # Remove classes with fewer than 2 samples
     class_counts = Counter(y)
-    valid_classes = {cls for cls, count in class_counts.items() if count >= 2}
+    valid_classes = {cls for cls, count in class_counts.items() if count >= 10}
     valid_indices = [i for i, label in enumerate(y) if label in valid_classes]
 
     X = X[valid_indices]
     y = np.array(y)[valid_indices]
 
-    if len(set(y)) < 2:
-        raise ValueError("Not enough classes with >=2 samples to perform classification.")
+    # if len(set(y)) < 2:
+    #     raise ValueError("Not enough classes with >=10 samples to perform classification.")
 
     # Label encode y
     le = LabelEncoder()
