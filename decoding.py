@@ -157,7 +157,7 @@ def parse_beh(directory_path, session=None):
 
 def assign_odor_directions(result_dict, forced_choice_dict):
     for event_id, info in result_dict.items():
-        odor_str = info.get('odor', '')
+        odor_str = info['odor']
         # Extract the odor number as int, assuming format 'Odor_XX'
         try:
             odor_num = int(odor_str.split('_')[1])
@@ -430,6 +430,7 @@ def run_analysis(session_path, session, window='default'):
         # Initialize data structures
         X_dict = {}
         odor_list = []
+        odor_direction_list = []
         tone_list = []
         direction_list = []
         X_raster = []
@@ -464,17 +465,20 @@ def run_analysis(session_path, session, window='default'):
 
             # Append label values
             odor_list.append(parsed_events[epoch]['odor'])
+            odor_direction_list.append(parsed_events[epoch]['odor_direction'])
             tone_list.append(parsed_events[epoch]['tone_pattern_id'])
             direction_list.append(parsed_events[epoch]['direction'])
 
         # Convert lists to arrays
         odor_arr = np.array(odor_list).reshape(-1, 1)
+        odor_direction_arr = np.array(odor_direction_list).reshape(-1,1)
         tone_arr = np.array(tone_list).reshape(-1, 1)
         direction_arr = np.array(direction_list).reshape(-1, 1)
 
         # Pack labels into dictionary
         y_dict = {
             'odor': odor_arr,
+            'odor_direction':odor_direction_arr,
             'tone_pattern_id': tone_arr,
             'direction': direction_arr
         }
